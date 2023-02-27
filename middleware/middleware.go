@@ -2,19 +2,22 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"gonelist/conf"
 	"gonelist/pkg/app"
 	"gonelist/pkg/e"
 	"gonelist/service/onedrive"
-	"gonelist/service/onedrive/model"
+	"gonelist/service/onedrive/auth"
+	"gonelist/service/onedrive/cache"
 )
 
 // 判断 onedrive 是否 login
 func CheckLogin() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if onedrive.GetClient() == nil {
+		if auth.GetClient() == nil && conf.UserSet.Onedrive.Remote != "local" {
 			// 没有 Client 则重定向到登陆
 			app.Response(c, http.StatusOK, e.REDIRECT_LOGIN, nil)
 			//c.Redirect(http.StatusFound, "/login")
@@ -40,6 +43,10 @@ func CheckOnedriveInit() gin.HandlerFunc {
 func CheckFolderPass() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		p := c.Query("path")
+		if conf.UserSet.Local.Enable && strings.HasPrefix(p, "/"+conf.UserSet.Local.Name) {
+			c.Next()
+			return
+		}
 		pass := c.GetHeader("pass")
 		// 判断 config.yml 中的密码
 		if !onedrive.CheckPassCorrect(p, pass) {
@@ -48,16 +55,36 @@ func CheckFolderPass() gin.HandlerFunc {
 			c.Abort()
 		}
 		// 判断路径下是否有 .password 文件
-		node, err := model.FindByPath(p)
-		if err != nil {
-			app.Response(c, http.StatusOK, e.PASS_ERROR, nil)
-			c.Abort()
+		node, ok := cache.Cache.Get(p)
+		// 如果文件不存在，不应该进行拦截，而应该放行，因为不拦截请求不存在的路径全部会报错密码错误，而且可以通过local请求
+		if !ok || node == nil {
+			//app.Response(c, http.StatusOK, e.PASS_ERROR, nil)
+			c.Next()
+			return
 		}
+
 		if node.Password == "" || node.Password == pass {
 			c.Next()
 		} else {
 			app.Response(c, http.StatusOK, e.PASS_ERROR, nil)
 			c.Abort()
 		}
+	}
+}
+
+// CheckSecret
+/**
+ * @Description: 用户权限鉴权，需要鉴权的api有，上传文件，创建文件夹，删除文件
+ * @return gin.HandlerFunc
+ */
+func CheckSecret() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		secret := ctx.Query("secret")
+		if secret != conf.UserSet.Admin.Secret {
+			app.Response(ctx, http.StatusOK, e.SECRET_ERROR, nil)
+			ctx.Abort()
+			return
+		}
+		ctx.Next()
 	}
 }

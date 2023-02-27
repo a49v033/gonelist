@@ -1,4 +1,4 @@
-package onedrive
+package auth
 
 import (
 	"context"
@@ -26,23 +26,22 @@ var (
 	oauthConfig      Config
 	oauthStateString string
 	client           *http.Client
-	cacheGoOnce      sync.Once
+	CacheOne         sync.Once
 )
 
-func SetOnedriveInfo(conf *conf.AllSet) {
+func SetOnedriveInfo(conf *conf.AllSet, initFunc func()) {
 	user := conf.Onedrive
 	clientID = user.ClientID
 	clientSecret = user.ClientSecret
 
-	var endPoint oauth2.Endpoint
-	endPoint = user.RemoteConf.EndPoint
+	endPoint := user.RemoteConf.EndPoint
 	// 只申请读权限，避免应用程序进行修改，但使用 config.yml 给的默认 id 还是不太安全
 	var scopes = []string{"offline_access", "files.read", "https://graph.microsoft.com/Sites.Read.All"}
 	// 如果允许上传，则申请读写权限
-	if conf.Server.EnableUpload {
+	if conf.Admin.EnableWrite {
 		scopes = append(scopes, "https://graph.microsoft.com/Files.ReadWrite.All")
 	}
-	SetROOTUrl(conf)
+
 	// 初始化 oauth 的 config
 	oauthConfig = Config{
 		Config: &oauth2.Config{
@@ -61,7 +60,7 @@ func SetOnedriveInfo(conf *conf.AllSet) {
 		client = oauthConfig.Client(ctx, tok)
 		log.WithField("refresh_token", tok.RefreshToken).Infof("从文件 %s 读取refresh_token成功", user.TokenPath)
 		// 初始化 onedrive 的内容
-		InitOnedrive()
+		initFunc()
 		return
 	}
 	client = nil

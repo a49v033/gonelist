@@ -3,11 +3,17 @@ package onedrive
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"gonelist/pkg/markdown"
+	"gonelist/service/onedrive/auth"
+	"gonelist/service/onedrive/cache"
 	"gonelist/service/onedrive/model"
+	"gonelist/service/onedrive/pojo"
+	"gonelist/service/onedrive/utils"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -22,7 +28,7 @@ func InitOnedrive() {
 	}
 	// 设置 onedrive 登陆状态
 	FileTree.SetLogin(true)
-	cacheGoOnce.Do(func() {
+	auth.CacheOne.Do(func() {
 		go SetAutoRefresh()
 	})
 }
@@ -30,26 +36,64 @@ func InitOnedrive() {
 // 刷新所有 onedrive 的内容
 // 包括 文件列表，README，password，搜索索引
 func RefreshOnedriveAll() error {
-	log.Info("开始刷新文件缓存")
-	_, token, _ := Delta(getToken())
-	setToken(token)
-	log.Infoln("刷新文件缓存结束")
+
 	// 构建搜索
+	go RefreshFiles()
+	// go RefreshReadme()
+	go RefreshPassword()
+
+	return nil
+}
+
+func RefreshPassword() {
+	defer func() {
+		err := recover()
+		if err != nil {
+			log.Errorln("刷新缓存过程中出现了不可预料的错误")
+			log.Errorln(err)
+		}
+	}()
+	log.Infoln("开始刷新password缓存")
+	err := GetPasswordNode()
+	if err != nil {
+		log.Errorln(err.Error())
+		return
+	}
+	log.Infoln("password缓存刷新结束")
+}
+
+func RefreshReadme() {
+	defer func() {
+		err := recover()
+		if err != nil {
+			log.Errorln("刷新缓存过程中出现了不可预料的错误")
+			log.Errorln(err)
+		}
+	}()
 	log.Infoln("开始刷新README.md缓存")
 	err := GetReadMeNodes()
 	if err != nil {
 		log.Errorln(err.Error())
-		return err
+		return
 	}
 	log.Infoln("README.md缓存刷新结束")
-	log.Infoln("开始刷新password缓存")
-	err = GetPasswordNode()
-	if err != nil {
-		log.Errorln(err.Error())
-		return err
-	}
-	log.Infoln("password缓存刷新结束")
-	return nil
+}
+
+func RefreshFiles() {
+	defer func() {
+		err := recover()
+		if err != nil {
+			log.Errorln("刷新缓存过程中出现了不可预料的错误")
+			log.Errorln(err)
+		}
+	}()
+	log.Info("开始刷新文件缓存")
+	start := time.Now()
+	_, token, _ := Delta(getToken())
+	setToken(token)
+	duration := time.Since(start)
+	log.Infoln(fmt.Sprintf("共用时%.2f分钟", duration.Minutes()))
+	log.Infoln("刷新文件缓存结束")
 }
 
 func GetPasswordNode() error {
@@ -69,7 +113,7 @@ func GetPasswordNode() error {
 			}
 			downloadUrl = url
 		}
-		resp, err := putOneURL(http.MethodGet, downloadUrl, map[string]string{}, nil)
+		resp, err := utils.GetData(http.MethodGet, downloadUrl, map[string]string{}, nil)
 		if err != nil {
 			return err
 		}
@@ -77,7 +121,7 @@ func GetPasswordNode() error {
 		if err != nil {
 			return err
 		}
-		log.Infoln(string(resp))
+		log.Debugln(string(resp))
 		parentNode.Password = string(resp)
 		parentNode.PasswordURL = downloadUrl
 		_ = model.UpdateFile(parentNode)
@@ -107,7 +151,7 @@ func GetReadMeNodes() error {
 			}
 			downloadUrl = url
 		}
-		resp, err := putOneURL(http.MethodGet, downloadUrl, map[string]string{}, nil)
+		resp, err := utils.GetData(http.MethodGet, downloadUrl, map[string]string{}, nil)
 		if err != nil {
 			return err
 		}
@@ -134,13 +178,13 @@ func CacheGetPathList(oPath string) ([]*model.FileNode, error) {
 	//	return []*model.FileNode{}, err
 	//}
 	//return ReturnNode(root), nil
-	node, err := model.FindByPath(oPath)
-	if err != nil || node == nil {
-		return nil, err
+	node, ok := cache.Cache.Get(oPath)
+	if node == nil || ok == false {
+		return nil, errors.New("file not found")
 	}
 	nodes, err := model.GetChildrenByID(node.ID)
 	if err != nil {
-		return nil, err
+		return []*model.FileNode{}, err
 	}
 	return nodes, err
 }
@@ -255,17 +299,15 @@ func ReturnNode(node *model.FileNode) []*model.FileNode {
 
 func getDownloadUrl(node *model.FileNode) (string, error) {
 	baseURl := "https://graph.microsoft.com/v1.0/me/drive/items/" + node.ID
-	resp, err := putOneURL(http.MethodGet, baseURl, map[string]string{}, nil)
+	resp, err := utils.GetData(http.MethodGet, baseURl, map[string]string{}, nil)
 	if err != nil {
 		return "", err
 	}
-	v := new(Value)
+	v := new(pojo.Value)
 	err = json.Unmarshal(resp, v)
 	if err != nil {
 		return "", err
 	}
-	node.DownloadURL = v.MicrosoftGraphDownloadURL
-	_ = model.UpdateFile(node)
 	return v.MicrosoftGraphDownloadURL, err
 }
 

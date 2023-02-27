@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -11,7 +12,10 @@ import (
 	"gonelist/conf"
 	"gonelist/pkg/app"
 	"gonelist/pkg/e"
+	"gonelist/service/local"
 	"gonelist/service/onedrive"
+	"gonelist/service/onedrive/cache"
+	"gonelist/service/onedrive/model"
 )
 
 // 测试接口，从 MG 获取整个树结构
@@ -31,22 +35,64 @@ func CacheGetPath(c *gin.Context) {
 	root, err := onedrive.CacheGetPathList(oPath)
 	// 如果没有找到文件则返回 404
 	if err != nil {
-		app.Response(c, http.StatusNotFound, e.ITEM_NOT_FOUND, nil)
-	} else if root == nil {
-		app.Response(c, http.StatusNotFound, e.LOAD_NOT_READY, nil)
-	} else {
-		app.Response(c, http.StatusOK, e.SUCCESS, root)
+		log.Errorln(err.Error())
+		err = nil
 	}
+	if conf.UserSet.Local.Enable {
+		if root == nil {
+			if oPath == "/" {
+				app.Response(c, http.StatusOK, e.SUCCESS, []*model.FileNode{{
+					Name:           conf.UserSet.Local.Name,
+					Path:           "/" + conf.UserSet.Local.Name,
+					IsFolder:       true,
+					LastModifyTime: time.Now(),
+					Size:           0,
+				}})
+				return
+			} else if strings.HasPrefix(oPath, "/"+conf.UserSet.Local.Name) {
+				nodes, err := local.GetPath(oPath)
+				if err != nil {
+					app.Response(c, http.StatusNotFound, e.ITEM_NOT_FOUND, nil)
+					return
+				}
+				app.Response(c, http.StatusOK, e.SUCCESS, nodes)
+				return
+			} else {
+				app.Response(c, http.StatusOK, e.SUCCESS, []*model.FileNode{})
+				return
+			}
+		} else {
+			if oPath == "/" {
+				app.Response(c, http.StatusOK, e.SUCCESS, append(root, &model.FileNode{
+					Name:           conf.UserSet.Local.Name,
+					Path:           "/" + conf.UserSet.Local.Name,
+					IsFolder:       true,
+					LastModifyTime: time.Now(),
+					Size:           0,
+				}))
+				return
+			} else {
+				app.Response(c, http.StatusOK, e.SUCCESS, root)
+			}
+		}
+	} else {
+		if root == nil {
+			app.Response(c, http.StatusOK, e.SUCCESS, []*model.FileNode{})
+		} else {
+			app.Response(c, http.StatusOK, e.SUCCESS, root)
+		}
+	}
+
 }
 
-// 创建文件夹
+// MkDir 创建文件夹
 func MkDir() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		path := ctx.Query("path")
 		folderName := ctx.Query("folder_name")
 		err := onedrive.Mkdir(path, folderName)
 		if err != nil {
-			app.Response(ctx, 403, 403, "")
+			app.Response(ctx, 403, 403, err)
 			return
 		}
 		app.Response(ctx, http.StatusOK, e.SUCCESS, "")
@@ -61,7 +107,7 @@ func MkDir() gin.HandlerFunc {
 func CheckUploadSecret() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		secret := ctx.Query("secret")
-		if secret != conf.UserSet.Onedrive.UploadSecret {
+		if secret != conf.UserSet.Admin.Secret {
 			app.Response(ctx, http.StatusOK, e.SECRET_ERROR, nil)
 			ctx.Abort()
 			return
@@ -86,7 +132,7 @@ func CheckUploadSecret() gin.HandlerFunc {
 //   403： the api not open
 func Upload() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		if !conf.UserSet.Server.EnableUpload {
+		if !conf.UserSet.Admin.EnableWrite {
 			app.Response(ctx, 403, 1403, "the api not open")
 			return
 		}
@@ -131,7 +177,7 @@ func Upload() gin.HandlerFunc {
 			if err != nil {
 				return
 			}
-			temp := make([]byte, conf.UserSet.Onedrive.UploadSliceSize*327680)
+			temp := make([]byte, conf.UserSet.Admin.UploadSliceSize*327680)
 			_, err = io.CopyBuffer(uploader, data, temp)
 			if err != nil {
 				return
@@ -140,8 +186,26 @@ func Upload() gin.HandlerFunc {
 			if err != nil {
 				return
 			}
+			onedrive.RefreshFiles()
 			app.Response(ctx, http.StatusOK, e.SUCCESS, nil)
 		}
+	}
+}
+
+func DeleteFile() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		path := ctx.Query("path")
+		node, ok := cache.Cache.Get(path)
+		if !ok {
+			app.Response(ctx, http.StatusOK, e.ITEM_NOT_FOUND, nil)
+			return
+		}
+		err := onedrive.DeleteFile(node.ID)
+		if err != nil {
+			app.Response(ctx, http.StatusOK, e.ERROR, err.Error())
+			return
+		}
+		app.Response(ctx, http.StatusOK, e.SUCCESS, nil)
 	}
 }
 
@@ -157,7 +221,7 @@ func Download(c *gin.Context) {
 
 	downloadURL, err := onedrive.GetDownloadUrl(filePath)
 	if err != nil || downloadURL == "" {
-		app.Response(c, http.StatusOK, e.ITEM_NOT_FOUND, nil)
+		app.Response(c, http.StatusOK, e.ITEM_NOT_FOUND, err)
 	} else {
 		c.Redirect(http.StatusFound, downloadURL)
 		c.Abort()

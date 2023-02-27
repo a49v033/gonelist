@@ -4,20 +4,24 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 
 	"gonelist/conf"
+	"gonelist/pkg/static"
 	"gonelist/routers"
 	"gonelist/service/onedrive"
+	"gonelist/service/onedrive/auth"
 )
 
 func main() {
 	confPath := flag.String("conf", "config.yml", "指定配置文件路径")
 	versionB := flag.Bool("version", false, "Show current version of gonelist.")
 	debugB := flag.Bool("debug", false, "debug log level")
+	getStatic := flag.Bool("static", false, "download the static files")
 	flag.Parse()
 
 	log.SetFormatter(&log.TextFormatter{
@@ -31,6 +35,15 @@ func main() {
 	if *debugB {
 		log.SetLevel(log.DebugLevel)
 	}
+	if *getStatic {
+		err := static.DownloadStatic(gVersion)
+		if err != nil {
+			log.Errorln("文件下载失败" + err.Error())
+			return
+		}
+		log.Infoln("文件下载完成，请重启程序")
+		os.Exit(3)
+	}
 	// 加载 config.yml
 	if err := conf.LoadUserConfig(*confPath); err != nil {
 		log.Fatal(err)
@@ -40,8 +53,9 @@ func main() {
 
 	// 设置 onedrive 的相关配置，如果有 .token 那么会在这儿进行处理初始化
 	// 否则在端口绑定之后通过接口登陆之后初始化
-	onedrive.SetOnedriveInfo(conf.UserSet)
-
+	onedrive.SetROOTUrl(conf.UserSet)
+	auth.SetOnedriveInfo(conf.UserSet, onedrive.InitOnedrive)
+	println(onedrive.GetDrive())
 	// 设置 version
 	if Version != "" {
 		conf.UserSet.Version = Version
@@ -50,7 +64,6 @@ func main() {
 	}
 	// 处理端口绑定
 	Addr := conf.GetBindAddr(conf.UserSet.Server.BindGlobal, conf.UserSet.Server.Port)
-
 	// 启动服务器
 	server := &http.Server{
 		Addr:           Addr,
@@ -64,7 +77,7 @@ func main() {
 }
 
 var (
-	gVersion     = "v0.5.4"
+	gVersion     = "v0.6.0"
 	Version      string
 	gitCommit    string
 	gitTreeState = ""                     // state of git tree, either "clean" or "dirty"

@@ -1,12 +1,13 @@
 package onedrive
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,12 +15,16 @@ import (
 	"github.com/tidwall/gjson"
 
 	"gonelist/conf"
+	"gonelist/service/onedrive/auth"
+	"gonelist/service/onedrive/cache"
 	"gonelist/service/onedrive/model"
+	"gonelist/service/onedrive/pojo"
+	"gonelist/service/onedrive/utils"
 )
 
 var (
-	// 默认 https://graph.microsoft.com/v1.0/me/drive/root/children
-	// ChinaCloud https://microsoftgraph.chinacloudapi.cn/v1.0/me/drive/root/children
+	// 默认 https://graph.microsoft.com/v1.0/me/drive
+	// ChinaCloud https://microsoftgraph.chinacloudapi.cn/v1.0/me/drive
 	ROOTUrl  string
 	UrlBegin string
 	UrlEnd   string
@@ -32,38 +37,55 @@ func SetROOTUrl(conf *conf.AllSet) {
 	UrlEnd = user.RemoteConf.UrlEnd
 }
 
+// Upload
+/**
+ * @Description: 小文件上传，直接传字节数组
+ * @param path
+ * @param fileName
+ * @param content
+ * @return error
+ */
 func Upload(path string, fileName string, content []byte) error {
-	baseURL := "https://graph.microsoft.com/v1.0/me/drive/root:" + path + "/" + url.PathEscape(fileName) + ":/content"
-	log.Infoln(baseURL)
-	resp, err := putOneURL("PUT", baseURL, map[string]string{}, content)
+	path = strings.TrimRight(path, "/")
+	node, b := cache.Cache.Get(path)
+	if !b {
+		return errors.New("parent folder not found")
+	}
+	baseURL := ROOTUrl + "/items/" + node.ID + ":/" + url.PathEscape(fileName) + ":/content"
+	resp, err := utils.GetData("PUT", baseURL, map[string]string{}, content)
 	if err != nil {
 		return err
 	}
-	log.Infoln(string(resp))
-	err = RefreshOnedriveAll()
-	if err != nil {
-		return err
-	}
+	log.Debugln(gjson.GetBytes(resp, "@this|@pretty"))
+	RefreshFiles()
 	return nil
 }
 
-func Delta(token string) (Answer, string, error) {
+// Delta
+/**
+ * @Description: 获取文件信息，记得不要删除.file_token
+ * @param token
+ * @return Answer
+ * @return string
+ * @return error
+ */
+func Delta(token string) (pojo.Answer, string, error) {
 	var (
-		ans     Answer
-		tempAns Answer
+		ans     pojo.Answer
+		tempAns pojo.Answer
 		baseURL string
 	)
 	baseURL = token
 	if baseURL == "" {
-		baseURL = "https://graph.microsoft.com/v1.0/me/drive/root/delta"
+		baseURL = ROOTUrl + "/root/delta"
 	}
 	//if token == "" {
-	//	baseURL = "https://graph.microsoft.com/v1.0/me/drive/root/delta"
+	//	baseURL = ROOTUrl+"/root/delta"
 	//} else {
-	//	baseURL = "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=" + token
+	//	baseURL = ROOTUrl+"/root/delta?token=" + token
 	//}
 	for {
-		resp, err := putOneURL(http.MethodGet, baseURL, map[string]string{}, nil)
+		resp, err := utils.GetData(http.MethodGet, baseURL, map[string]string{}, nil)
 		if err != nil {
 			return ans, "", err
 		}
@@ -81,7 +103,7 @@ func Delta(token string) (Answer, string, error) {
 		} else {
 			ans.Value = append(ans.Value, tempAns.Value...)
 		}
-		if tempAns.OdataNextLink == "" {
+		if tempAns.OdataDeltaLink != "" {
 			baseURL = tempAns.OdataDeltaLink
 			break
 		} else {
@@ -158,69 +180,39 @@ func Mkdir(path, floderName string) error {
 	//if err != nil {
 	//	return err
 	//}
-	node, err := model.FindByPath(path)
-	if err != nil {
-		return err
+	if path == "" {
+		path = "/"
+	}
+	node, ok := cache.Cache.Get(path)
+	if !ok {
+		return errors.New("file not found")
 	}
 	m := map[string]interface{}{"name": floderName, "folder": map[string]string{}}
 	data, _ := json.Marshal(m)
-	baseURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/children",
+	baseURL := fmt.Sprintf(ROOTUrl+"/items/%s/children",
 		node.ID)
-	_, err = putOneURL(http.MethodPost, baseURL, map[string]string{"Content-Type": "application/json"}, data)
+	resp, err := utils.GetData(http.MethodPost, baseURL, map[string]string{"Content-Type": "application/json"}, data)
 	if err != nil {
 		return err
 	}
+	log.Infoln(gjson.GetBytes(resp, "@this|@pretty"))
+	RefreshFiles()
 	return err
-
 }
 
-func putOneURL(method, url1 string, headers map[string]string, data []byte) ([]byte, error) {
-	var (
-		resp *http.Response
-		body []byte
-		err  error
-	)
-
-	client := GetClient()
-	if client == nil {
-		log.Errorln("cannot get client to start request.")
-		return nil, fmt.Errorf("RequestOneURL cannot get client")
-	}
-	request, err := http.NewRequest(method, url1, bytes.NewReader(data))
-	for key, value := range headers {
-		request.Header.Add(key, value)
-	}
-	// 如果超时，重试两次
-	for retryCount := 3; retryCount > 0; retryCount-- {
-		if resp, err = client.Do(request); err != nil && strings.Contains(err.Error(), "timeout") {
-			log.WithFields(log.Fields{
-				"url":  url1,
-				"resp": resp,
-				"err":  err,
-			}).Info("RequestOneUrl 出现错误，开始重试")
-			<-time.After(time.Second / 3)
-		} else {
-			break
-		}
-	}
-
+func DeleteFile(id string) error {
+	baseURL := fmt.Sprintf(ROOTUrl+"/items/%s", id)
+	resp, err := utils.GetData(http.MethodDelete, baseURL, map[string]string{}, nil)
 	if err != nil {
-		log.WithFields(log.Fields{
-			"url":  url1,
-			"resp": resp,
-			"err":  err,
-		}).Info("请求 graph.microsoft.com 失败, request timeout")
-		return body, err
+		return err
 	}
-
-	if body, err = ioutil.ReadAll(resp.Body); err != nil {
-		log.WithField("err", err).Info("读取 graph.microsoft.com 返回内容失败")
-		return body, err
-	}
-	return body, nil
+	log.Debugln(gjson.GetBytes(resp, "@this|@pretty"))
+	RefreshFiles()
+	return err
 }
 
-// 获取所有文件的树
+// GetAllFiles 获取所有文件的树
+// Deprecated: 该方法已废弃
 func GetAllFiles() (*model.FileNode, error) {
 	var (
 		err  error
@@ -252,13 +244,83 @@ func GetAllFiles() (*model.FileNode, error) {
 	return root, nil
 }
 
+// GetDrive get the drive id
+func GetDrive() (string, error) {
+	data, err := utils.GetData(http.MethodGet, ROOTUrl, map[string]string{}, nil)
+	if err != nil {
+		return "", err
+	}
+	id := gjson.GetBytes(data, "id")
+	return id.String(), err
+}
+
+func Copy(src, desc string) error {
+	src = strings.TrimRight(src, "/")
+	if desc != "/" {
+		desc = strings.TrimRight(desc, "/")
+	}
+
+	srcNode, b := cache.Cache.Get(src)
+	if !b {
+		return errors.New("the src node not found")
+	}
+
+	descNode, b := cache.Cache.Get(desc)
+	if !b {
+		return errors.New("the desc node not found")
+	}
+	drive, _ := GetDrive()
+	baseUrl := fmt.Sprintf("%s/items/%v/copy", ROOTUrl, srcNode.ID)
+	d := map[string]interface{}{
+		"parentReference": map[string]string{
+			"id":      descNode.ID,
+			"driveId": drive,
+		},
+		"name": filepath.Base(src),
+	}
+	data, _ := json.Marshal(d)
+	resp, err := utils.GetData(http.MethodPost, baseUrl, map[string]string{"Content-type": "application/json"}, data)
+	log.Debugln("[copy] " + gjson.GetBytes(resp, "@this|@pretty").String())
+	return err
+}
+
+func Move(src, desc string) error {
+	src = strings.TrimRight(src, "/")
+	if desc != "/" {
+		desc = strings.TrimRight(desc, "/")
+	}
+
+	srcNode, b := cache.Cache.Get(src)
+	if !b {
+		return errors.New("the src node not found")
+	}
+
+	descNode, b := cache.Cache.Get(desc)
+	if !b {
+		return errors.New("the desc node not found")
+	}
+	baseUrl := fmt.Sprintf("%s/items/%v", ROOTUrl, srcNode.ID)
+	d := map[string]interface{}{
+		"parentReference": map[string]string{
+			"id":   descNode.ID,
+			"path": descNode.Path,
+		},
+		"name": filepath.Base(src),
+	}
+	data, _ := json.Marshal(d)
+	resp, err := utils.GetData(http.MethodPatch, baseUrl, map[string]string{"Content-type": "application/json"}, data)
+	log.Debugln("[move] " + gjson.GetBytes(resp, "@this|@pretty").String())
+	return err
+}
+
 // 获取树的一个节点
 // list 返回当前文件夹中的所有文件夹和文件
 // readmeUrl 这个是当前文件夹 readme 文件的下载链接
 // err 返回错误
+// Deprecated: 该方法已废弃
 func GetTreeFileNode(relativePath string) (list []*model.FileNode, readmeUrl, passUrl string, err error) {
 	var (
-		ans Answer
+		ans pojo.Answer
 	)
 
 	ans, err = GetUrlToAns(relativePath)
@@ -294,12 +356,13 @@ func GetTreeFileNode(relativePath string) (list []*model.FileNode, readmeUrl, pa
 }
 
 // 获取某个路径的内容，如果 token 失效或没有正常结果返回 err
-func GetUrlToAns(relativePath string) (Answer, error) {
+// Deprecated: 该方法已废弃
+func GetUrlToAns(relativePath string) (pojo.Answer, error) {
 	// 默认一次获取 3000 个文件
 	var (
 		baseURL string
-		ans     Answer
-		tmpAns  Answer
+		ans     pojo.Answer
+		tmpAns  pojo.Answer
 		err     error
 	)
 
@@ -340,9 +403,10 @@ func GetUrlToAns(relativePath string) (Answer, error) {
 	return ans, nil
 }
 
-func RequestAnswer(urlstr string, relativePath string) (Answer, error) {
+// Deprecated: 该方法已废弃
+func RequestAnswer(urlstr string, relativePath string) (pojo.Answer, error) {
 	var (
-		ans Answer
+		ans pojo.Answer
 	)
 	if strings.Contains(urlstr, "%") {
 		log.Debugf("123")
@@ -371,7 +435,7 @@ func RequestAnswer(urlstr string, relativePath string) (Answer, error) {
 		return ans, err
 	}
 	log.Debugf("url:%s relativePath:%s | body:%s", urlstr, relativePath, string(body))
-	err = CheckAnswerValid(ans, relativePath)
+	err = pojo.CheckAnswerValid(ans, relativePath)
 
 	//如果获取内容不正常，则返回
 	if err != nil {
@@ -386,7 +450,7 @@ func RequestOneUrl(url string) (body []byte, err error) {
 		client *http.Client // 获取全局的 client 来请求接口
 		resp   *http.Response
 	)
-	if client = GetClient(); client == nil {
+	if client = auth.GetClient(); client == nil {
 		log.Errorln("cannot get client to start request.")
 		return nil, fmt.Errorf("RequestOneURL cannot get client")
 	}

@@ -7,6 +7,9 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+
+	"gonelist/service/onedrive/cache"
+	"gonelist/service/onedrive/utils"
 )
 
 // Uploader
@@ -17,6 +20,14 @@ type Uploader struct {
 	sessionURL   string
 	fileSize     int64
 	currentWrite int64
+}
+
+func (u *Uploader) Close() error {
+	_, err := utils.GetData(http.MethodDelete, u.sessionURL, map[string]string{}, nil)
+	if err != nil {
+		return err
+	}
+	return err
 }
 
 func NewUploader() *Uploader {
@@ -35,12 +46,12 @@ func (u *Uploader) Write(p []byte) (n int, err error) {
 	m := map[string]string{"Content-Range": fmt.Sprintf("bytes %d-%d/%d",
 		u.currentWrite, u.currentWrite+int64(len(p))-1, u.fileSize)}
 	log.Debugln(fmt.Sprintf("文件上传中==》%v", (u.currentWrite/u.fileSize)*100))
-	resp, err := putOneURL(http.MethodPut, u.sessionURL, m, p)
+	resp, err := utils.GetData(http.MethodPut, u.sessionURL, m, p)
 	if err != nil {
 		return 0, err
 	}
 	u.currentWrite += int64(len(p))
-	log.Infoln(gjson.GetBytes(resp, "@this|@pretty"))
+	log.Debugln(gjson.GetBytes(resp, "@this|@pretty"))
 	return len(p), err
 }
 
@@ -54,9 +65,13 @@ func (u *Uploader) Write(p []byte) (n int, err error) {
  * @return error
  */
 func (u *Uploader) CreateSession(path, fileName string, fileSize int64) error {
-	sessionURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/root:%s/%s:/createUploadSession",
-		path, fileName)
-	data, err := putOneURL(http.MethodPost, sessionURL, map[string]string{}, nil)
+	node, b := cache.Cache.Get(path)
+	if !b {
+		return errors.New("parent folder not found")
+	}
+	sessionURL := fmt.Sprintf(ROOTUrl+"/items/%s:/%s:/createUploadSession",
+		node.ID, fileName)
+	data, err := utils.GetData(http.MethodPost, sessionURL, map[string]string{}, nil)
 	if err != nil {
 		return err
 	}

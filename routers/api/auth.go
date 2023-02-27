@@ -1,20 +1,23 @@
 package api
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
+
 	"gonelist/conf"
 	"gonelist/pkg/app"
 	"gonelist/pkg/e"
 	"gonelist/service/onedrive"
-	"net/http"
+	"gonelist/service/onedrive/auth"
 )
 
 // 通过监听一个地址，跳转打开 login
 func Login(c *gin.Context) {
 	conf.UserSet.Server.SiteUrl = c.GetHeader("Host")
 	// 判断是否登录
-	if onedrive.FileTree.IsLogin() == true {
+	if onedrive.FileTree.IsLogin() || conf.UserSet.Onedrive.Remote == "local" {
 		// 有 Client 则重定向到首页
 		c.Redirect(http.StatusFound, "/onedrive/getpath?path=/")
 	} else {
@@ -25,14 +28,14 @@ func Login(c *gin.Context) {
 
 // 跳转到网页登录
 func LoginMG(c *gin.Context) {
-	onedrive.RedirectLoginMG(c)
+	auth.RedirectLoginMG(c)
 	c.Abort()
 }
 
 // 接受 code
 func GetCode(c *gin.Context) {
 	var err error
-	code := &onedrive.ReceiveCode{
+	code := &auth.ReceiveCode{
 		Code: c.Query("code"),
 		//SessionState: c.Query("session_state"), // 有的账号好像没有
 		State: c.Query("state"),
@@ -44,7 +47,7 @@ func GetCode(c *gin.Context) {
 		return
 	}
 	// 获取 AccessToken
-	err = onedrive.GetAccessToken(*code)
+	err = auth.GetAccessToken(*code)
 	if err != nil {
 		app.Response(c, http.StatusOK, e.GetErrorCode(err), "登陆失败，请重新登陆")
 	} else {

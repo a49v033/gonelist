@@ -7,6 +7,15 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var (
+	nodeChan chan *FileNode
+)
+
+func init() {
+	nodeChan = make(chan *FileNode, 100)
+	go insertFile()
+}
+
 // initTable
 /**
  * @Description: 初始化表格
@@ -32,7 +41,36 @@ func initTable() {
 		log.Errorln(err.Error())
 		return
 	}
+	// 为path创建唯一索引
+	_, err = db.Exec(`create unique index  path_index on file (path)`)
+	if err != nil {
+		log.Errorln(err.Error())
+		return
+	}
 }
+
+func insertFile() {
+	for {
+		node := <-nodeChan
+		_, err := db.Exec(`insert into file  values (?,?,?,?,?,?,?,?,?,?,?);`,
+			node.ID,
+			node.Name,
+			node.Path,
+			node.READMEUrl,
+			node.IsFolder,
+			node.DownloadURL,
+			node.LastModifyTime.Unix(),
+			node.Size,
+			node.Password,
+			node.PasswordURL,
+			node.ParentID)
+		if err != nil {
+			log.Errorln("数据库插入失败 " + err.Error())
+		}
+	}
+}
+
+var i = 0
 
 // InsetFile
 /**
@@ -41,23 +79,10 @@ func initTable() {
  * @return error
  */
 func InsetFile(node *FileNode) error {
-	_, err := db.Exec(`insert into file  values (?,?,?,?,?,?,?,?,?,?,?);`,
-		node.ID,
-		node.Name,
-		node.Path,
-		node.READMEUrl,
-		node.IsFolder,
-		node.DownloadURL,
-		node.LastModifyTime.Unix(),
-		node.Size,
-		node.Password,
-		node.PasswordURL,
-		node.ParentID)
-	if err != nil {
-		log.Errorln("数据库插入失败 " + err.Error())
-		return err
-	}
-	return err
+	i++
+	log.Infoln("添加了一个新的文件 ==》" + node.Path)
+	nodeChan <- node
+	return nil
 }
 
 // BatchInsertFile
@@ -111,6 +136,7 @@ func BatchInsertFile(nodes []*FileNode) error {
  * @return error
  */
 func DeleteFile(id string) error {
+	log.Errorln("检测到文件删除 ==》" + id)
 	_, err := db.Exec(`delete from main.file where id = ?;`, id)
 	if err != nil {
 		return err
@@ -160,7 +186,7 @@ func Find(id string) (*FileNode, error) {
 			&node.DownloadURL, &t, &node.Size, &node.Password,
 			&node.PasswordURL, &node.ParentID)
 	if err != nil {
-		log.Errorln("数据查找出现错误 " + err.Error())
+		// log.Errorln("数据查找出现错误 " + err.Error())
 		return nil, err
 	}
 	node.LastModifyTime = time.Unix(t, 0)
@@ -216,7 +242,6 @@ func FindByPath(path string) (*FileNode, error) {
 			&node.DownloadURL, &t, &node.Size, &node.Password,
 			&node.PasswordURL, &node.ParentID)
 	if err != nil {
-		log.Errorln("数据查找出现错误 " + err.Error())
 		return nil, err
 	}
 	node.LastModifyTime = time.Unix(t, 0)
@@ -257,15 +282,26 @@ func FindByName(name string) ([]*FileNode, error) {
 	return nodes, err
 }
 
-func Search(key string) ([]*FileNode, error) {
+func Search(key string, path string) ([]*FileNode, error) {
 	var (
 		nodes []*FileNode
 		t     int64
+		rows  *sql.Rows
+		err   error
 	)
-	rows, err := db.Query("select * from file where name like ?", "%"+key+"%")
-	if err != nil {
-		return nil, err
+	if path == "" {
+		rows, err = db.Query("select * from file where name like ?;", "%"+key+"%")
+	} else {
+		node, err := FindByPath(path)
+		if err != nil {
+			return nil, err
+		}
+		rows, err = db.Query("select * from file where name like ? and parent_id=?", "%"+key+"%", node.ID)
+		if err != nil {
+			return nil, err
+		}
 	}
+
 	defer func(rows *sql.Rows) {
 		_ = rows.Close()
 	}(rows)
